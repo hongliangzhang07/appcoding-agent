@@ -860,9 +860,16 @@ func (s *connectionState) startSession(in inboundMessage) error {
 	}
 
 	args := buildToolArgs(tool, in.Args)
-	cmd := exec.Command(execName, args...)
+	cmdEnv := withTerminalEnv(os.Environ())
+	resolvedExec, err := resolveExecutable(execName, cmdEnv)
+	if err != nil {
+		s.sessionMu.Unlock()
+		return fmt.Errorf("failed to start %s: %s", execName, formatToolStartError(tool, execName, err))
+	}
+
+	cmd := exec.Command(resolvedExec, args...)
 	cmd.Dir = cwd
-	cmd.Env = withTerminalEnv(os.Environ())
+	cmd.Env = cmdEnv
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -1160,6 +1167,39 @@ func ensureCommandPath(current string) string {
 	return strings.Join(ordered, string(os.PathListSeparator))
 }
 
+func resolveExecutable(execName string, env []string) (string, error) {
+	name := strings.TrimSpace(execName)
+	if name == "" {
+		return "", fmt.Errorf("empty executable name")
+	}
+	if strings.ContainsRune(name, os.PathSeparator) {
+		return filepath.Clean(name), nil
+	}
+
+	pathValue := ""
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			pathValue = strings.TrimPrefix(kv, "PATH=")
+			break
+		}
+	}
+	for _, dir := range filepath.SplitList(pathValue) {
+		if strings.TrimSpace(dir) == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		if info.Mode()&0o111 == 0 {
+			continue
+		}
+		return candidate, nil
+	}
+	return "", fmt.Errorf("exec: %q: executable file not found in $PATH", name)
+}
+
 func (s *connectionState) waitSessionExit(sess *session) {
 	err := sess.cmd.Wait()
 	exitCode := exitCodeFromError(err)
@@ -1271,9 +1311,15 @@ func (s *connectionState) runClaudeTurn(sess *session, prompt string) {
 	args = append(args, prompt)
 
 	execName := s.server.toolExecName("claude", "claude")
-	cmd := exec.Command(execName, args...)
+	cmdEnv := withTerminalEnv(os.Environ())
+	resolvedExec, err := resolveExecutable(execName, cmdEnv)
+	if err != nil {
+		_ = s.sendError(formatToolStartError("claude", execName, err))
+		return
+	}
+	cmd := exec.Command(resolvedExec, args...)
 	cmd.Dir = cwd
-	cmd.Env = withTerminalEnv(os.Environ())
+	cmd.Env = cmdEnv
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
