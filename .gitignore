@@ -1,0 +1,7 @@
+*.log
+.env
+.desktop-agent-go
+.agent/
+dist/
+appcoding-agent
+desktop-agent-go
