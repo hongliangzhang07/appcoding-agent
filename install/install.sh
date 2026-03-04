@@ -20,6 +20,7 @@ ENV_PATH="${CONFIG_DIR}/agent.env"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 SYSTEMD_PATH="${SYSTEMD_DIR}/${SERVICE_UNIT}"
+CLOUDFLARED_BIN=""
 
 say() { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
@@ -44,7 +45,8 @@ install_exec() {
 
 ensure_cloudflared() {
   if command -v cloudflared >/dev/null 2>&1; then
-    say "cloudflared found: $(command -v cloudflared)"
+    CLOUDFLARED_BIN="$(command -v cloudflared)"
+    say "cloudflared found: ${CLOUDFLARED_BIN}"
     return 0
   fi
 
@@ -85,12 +87,63 @@ ensure_cloudflared() {
   fi
 
   if command -v cloudflared >/dev/null 2>&1; then
-    say "cloudflared installed: $(command -v cloudflared)"
+    CLOUDFLARED_BIN="$(command -v cloudflared)"
+    say "cloudflared installed: ${CLOUDFLARED_BIN}"
+    return 0
+  fi
+
+  local fallback_url=""
+  case "${os}:${arch}" in
+    linux:amd64) fallback_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64" ;;
+    linux:arm64) fallback_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64" ;;
+    darwin:amd64) fallback_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz" ;;
+    darwin:arm64) fallback_url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz" ;;
+  esac
+
+  if [[ -n "$fallback_url" ]]; then
+    local local_bin_dir="${STATE_DIR}/bin"
+    local local_bin="${local_bin_dir}/cloudflared"
+    mkdir -p "$local_bin_dir"
+    say "trying direct cloudflared binary download..."
+    if [[ "$fallback_url" == *.tgz ]]; then
+      local cf_tgz="${local_bin_dir}/cloudflared.tgz"
+      if curl -fsSL "$fallback_url" -o "$cf_tgz"; then
+        tar -xzf "$cf_tgz" -C "$local_bin_dir" >/dev/null 2>&1 || true
+        rm -f "$cf_tgz"
+      fi
+      if [[ -x "${local_bin_dir}/cloudflared" ]]; then
+        CLOUDFLARED_BIN="${local_bin_dir}/cloudflared"
+      fi
+    else
+      if curl -fsSL "$fallback_url" -o "$local_bin"; then
+        chmod +x "$local_bin" || true
+      fi
+      if [[ -x "$local_bin" ]]; then
+        CLOUDFLARED_BIN="$local_bin"
+      fi
+    fi
+  fi
+
+  if [[ -n "$CLOUDFLARED_BIN" && -x "$CLOUDFLARED_BIN" ]]; then
+    say "cloudflared installed (local): ${CLOUDFLARED_BIN}"
     return 0
   fi
 
   warn "cloudflared is still missing; install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
   return 1
+}
+
+set_env_kv() {
+  local key="$1"
+  local value="$2"
+  local tmp_env="${ENV_PATH}.tmp"
+  awk -v k="$key" -v v="$value" '
+    BEGIN { done=0 }
+    $0 ~ ("^" k "=") { print k "=" v; done=1; next }
+    { print }
+    END { if (!done) print k "=" v }
+  ' "$ENV_PATH" >"$tmp_env"
+  mv "$tmp_env" "$ENV_PATH"
 }
 
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
@@ -181,6 +234,11 @@ awk '
 ' "$ENV_PATH" >"$tmp_env"
 mv "$tmp_env" "$ENV_PATH"
 say "set AGENT_QR_LOG=1 in $ENV_PATH"
+
+if [[ -n "$CLOUDFLARED_BIN" && -x "$CLOUDFLARED_BIN" ]]; then
+  set_env_kv "AGENT_TUNNEL_BIN" "$CLOUDFLARED_BIN"
+  say "set AGENT_TUNNEL_BIN=${CLOUDFLARED_BIN} in $ENV_PATH"
+fi
 
 cat >"$RUNNER_PATH" <<RUN
 #!/usr/bin/env bash
@@ -352,7 +410,7 @@ UNIT
   fi
 fi
 
-if command -v cloudflared >/dev/null 2>&1; then
+if [[ -n "$CLOUDFLARED_BIN" && -x "$CLOUDFLARED_BIN" ]] || command -v cloudflared >/dev/null 2>&1; then
   "$CTL_PATH" tunnel-start >/dev/null 2>&1 || warn "failed to auto-start tunnel"
   sleep 1
 else
