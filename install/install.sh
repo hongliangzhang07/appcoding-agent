@@ -40,6 +40,57 @@ install_exec() {
   die "no permission to write $dst, and sudo is unavailable"
 }
 
+ensure_cloudflared() {
+  if command -v cloudflared >/dev/null 2>&1; then
+    say "cloudflared found: $(command -v cloudflared)"
+    return 0
+  fi
+
+  if [[ "${APP_AGENT_INSTALL_CLOUDFLARED:-1}" != "1" ]]; then
+    warn "skip cloudflared install (APP_AGENT_INSTALL_CLOUDFLARED=0)"
+    return 1
+  fi
+
+  say "cloudflared not found, trying to install..."
+  if [[ "$os" == "darwin" ]]; then
+    if command -v brew >/dev/null 2>&1; then
+      brew install cloudflared || warn "brew install cloudflared failed"
+    else
+      warn "homebrew not found, cannot auto-install cloudflared on macOS"
+    fi
+  elif [[ "$os" == "linux" ]]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      if command -v sudo >/dev/null 2>&1; then
+        sudo apt-get update -y && sudo apt-get install -y cloudflared || warn "apt install cloudflared failed"
+      else
+        apt-get update -y && apt-get install -y cloudflared || warn "apt install cloudflared failed"
+      fi
+    elif command -v dnf >/dev/null 2>&1; then
+      if command -v sudo >/dev/null 2>&1; then
+        sudo dnf install -y cloudflared || warn "dnf install cloudflared failed"
+      else
+        dnf install -y cloudflared || warn "dnf install cloudflared failed"
+      fi
+    elif command -v yum >/dev/null 2>&1; then
+      if command -v sudo >/dev/null 2>&1; then
+        sudo yum install -y cloudflared || warn "yum install cloudflared failed"
+      else
+        yum install -y cloudflared || warn "yum install cloudflared failed"
+      fi
+    else
+      warn "no supported package manager found for cloudflared auto-install"
+    fi
+  fi
+
+  if command -v cloudflared >/dev/null 2>&1; then
+    say "cloudflared installed: $(command -v cloudflared)"
+    return 0
+  fi
+
+  warn "cloudflared is still missing; install manually: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+  return 1
+}
+
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch_raw="$(uname -m)"
 case "$os" in
@@ -89,6 +140,7 @@ install_exec "$binary_src" "$BIN_PATH"
 say "installed binary: $BIN_PATH"
 
 mkdir -p "$STATE_DIR" "$CONFIG_DIR"
+ensure_cloudflared || true
 
 if [[ ! -f "$ENV_PATH" ]]; then
   cat >"$ENV_PATH" <<'CONF'
@@ -279,7 +331,10 @@ UNIT
   fi
 fi
 
-if ! command -v cloudflared >/dev/null 2>&1; then
+if command -v cloudflared >/dev/null 2>&1; then
+  "$CTL_PATH" tunnel-start >/dev/null 2>&1 || warn "failed to auto-start tunnel"
+  sleep 1
+else
   warn "cloudflared is not installed, tunnel-start will fail until installed"
 fi
 
@@ -290,3 +345,9 @@ echo "  ${APP_NAME}ctl status"
 echo "  ${APP_NAME}ctl pairing"
 echo "  ${APP_NAME}ctl tunnel-status"
 echo "  ${APP_NAME}ctl logs"
+
+echo
+echo "Current status:"
+"$CTL_PATH" status || true
+"$CTL_PATH" tunnel-status || true
+"$CTL_PATH" pairing || true
