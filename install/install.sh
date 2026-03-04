@@ -7,6 +7,8 @@ SERVICE_UNIT="appcoding-agent.service"
 
 REPO="${APP_AGENT_GH_REPO:-hongliangzhang07/appcoding-agent}"
 VERSION="${APP_AGENT_VERSION:-latest}"
+ARCHIVE_FILE="${APP_AGENT_ARCHIVE_FILE:-}"
+ARCHIVE_URL="${APP_AGENT_ARCHIVE_URL:-}"
 INSTALL_DIR="${APP_AGENT_INSTALL_DIR:-/usr/local/bin}"
 STATE_DIR="${APP_AGENT_STATE_DIR:-$HOME/.appcoding-agent}"
 CONFIG_DIR="${APP_AGENT_CONFIG_DIR:-$HOME/.config/appcoding-agent}"
@@ -118,9 +120,18 @@ fi
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-say "downloading ${asset}"
-curl -fsSL "${base_url}/${asset}" -o "${tmp_dir}/${asset}" || die "failed to download ${asset} from ${base_url}"
-curl -fsSL "${base_url}/checksums.txt" -o "${tmp_dir}/checksums.txt" || true
+if [[ -n "$ARCHIVE_FILE" ]]; then
+  [[ -f "$ARCHIVE_FILE" ]] || die "APP_AGENT_ARCHIVE_FILE not found: $ARCHIVE_FILE"
+  cp "$ARCHIVE_FILE" "${tmp_dir}/${asset}"
+  say "using local archive: $ARCHIVE_FILE"
+elif [[ -n "$ARCHIVE_URL" ]]; then
+  say "downloading archive from APP_AGENT_ARCHIVE_URL"
+  curl -fsSL "$ARCHIVE_URL" -o "${tmp_dir}/${asset}" || die "failed to download archive from APP_AGENT_ARCHIVE_URL"
+else
+  say "downloading ${asset}"
+  curl -fsSL "${base_url}/${asset}" -o "${tmp_dir}/${asset}" || die "failed to download ${asset} from ${base_url}"
+  curl -fsSL "${base_url}/checksums.txt" -o "${tmp_dir}/checksums.txt" || true
+fi
 
 if [[ -f "${tmp_dir}/checksums.txt" ]]; then
   if command -v shasum >/dev/null 2>&1; then
@@ -160,6 +171,16 @@ CONF
 else
   say "reuse existing env config: $ENV_PATH"
 fi
+
+tmp_env="${ENV_PATH}.tmp"
+awk '
+  BEGIN { done=0 }
+  /^AGENT_QR_LOG=/ { print "AGENT_QR_LOG=1"; done=1; next }
+  { print }
+  END { if (!done) print "AGENT_QR_LOG=1" }
+' "$ENV_PATH" >"$tmp_env"
+mv "$tmp_env" "$ENV_PATH"
+say "set AGENT_QR_LOG=1 in $ENV_PATH"
 
 cat >"$RUNNER_PATH" <<RUN
 #!/usr/bin/env bash
@@ -349,5 +370,34 @@ echo "  ${APP_NAME}ctl logs"
 echo
 echo "Current status:"
 "$CTL_PATH" status || true
-"$CTL_PATH" tunnel-status || true
-"$CTL_PATH" pairing || true
+
+http_addr="127.0.0.1:8088"
+if [[ -f "$ENV_PATH" ]]; then
+  raw_addr="$(awk -F= '/^AGENT_ADDR=/{print $2}' "$ENV_PATH" | tail -n1 | tr -d '"' | tr -d "'" | xargs || true)"
+  if [[ -n "$raw_addr" ]]; then
+    if [[ "$raw_addr" == :* ]]; then
+      http_addr="127.0.0.1${raw_addr}"
+    elif [[ "$raw_addr" == 0.0.0.0:* ]]; then
+      http_addr="127.0.0.1:${raw_addr#0.0.0.0:}"
+    else
+      http_addr="$raw_addr"
+    fi
+  fi
+fi
+
+ready=0
+for ((i=0; i<20; i++)); do
+  if curl -fsSL "http://${http_addr}/health" >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+
+if [[ "$ready" == "1" ]]; then
+  "$CTL_PATH" tunnel-status || true
+  "$CTL_PATH" pairing || true
+else
+  warn "agent is not ready on http://${http_addr} yet"
+  warn "run: ${APP_NAME}ctl logs"
+fi
