@@ -46,6 +46,8 @@ type appConfig struct {
 	Addr               string
 	DefaultCWD         string
 	LegacyToken        string
+	ClaudeBin          string
+	CodexBin           string
 	SkipAuth           bool
 	StatePath          string
 	QRPath             string
@@ -318,6 +320,8 @@ func loadConfig() (appConfig, error) {
 		Addr:               addr,
 		DefaultCWD:         defaultCWD,
 		LegacyToken:        strings.TrimSpace(os.Getenv("AGENT_TOKEN")),
+		ClaudeBin:          strings.TrimSpace(getenv("AGENT_CLAUDE_BIN", "claude")),
+		CodexBin:           strings.TrimSpace(getenv("AGENT_CODEX_BIN", "codex")),
 		SkipAuth:           getenv("AGENT_SKIP_AUTH", "0") == "1",
 		StatePath:          statePath,
 		QRPath:             qrPath,
@@ -803,10 +807,11 @@ func (s *connectionState) handlePairRequest(in inboundMessage) error {
 
 func (s *connectionState) startSession(in inboundMessage) error {
 	tool := strings.ToLower(strings.TrimSpace(in.Tool))
-	execName, ok := allowedTool(tool)
+	defaultExecName, ok := allowedTool(tool)
 	if !ok {
 		return fmt.Errorf("unsupported tool %q, allowed: claude, codex", in.Tool)
 	}
+	execName := s.server.toolExecName(tool, defaultExecName)
 
 	sessionID := strings.TrimSpace(in.SessionID)
 	if sessionID == "" {
@@ -876,7 +881,7 @@ func (s *connectionState) startSession(in inboundMessage) error {
 	}
 	if err := cmd.Start(); err != nil {
 		s.sessionMu.Unlock()
-		return fmt.Errorf("failed to start %s: %w", execName, err)
+		return fmt.Errorf("failed to start %s: %s", execName, formatToolStartError(tool, execName, err))
 	}
 
 	sess := &session{
@@ -1080,9 +1085,10 @@ func extractClaudeMessageText(message map[string]any) []string {
 }
 
 func withTerminalEnv(env []string) []string {
-	out := make([]string, 0, len(env)+2)
+	out := make([]string, 0, len(env)+3)
 	hasTERM := false
 	hasColor := false
+	hasPath := false
 
 	for _, kv := range env {
 		switch {
@@ -1092,6 +1098,10 @@ func withTerminalEnv(env []string) []string {
 		case strings.HasPrefix(kv, "COLORTERM="):
 			out = append(out, "COLORTERM=truecolor")
 			hasColor = true
+		case strings.HasPrefix(kv, "PATH="):
+			rawPath := strings.TrimPrefix(kv, "PATH=")
+			out = append(out, "PATH="+ensureCommandPath(rawPath))
+			hasPath = true
 		default:
 			out = append(out, kv)
 		}
@@ -1103,7 +1113,51 @@ func withTerminalEnv(env []string) []string {
 	if !hasColor {
 		out = append(out, "COLORTERM=truecolor")
 	}
+	if !hasPath {
+		out = append(out, "PATH="+ensureCommandPath(""))
+	}
 	return out
+}
+
+func ensureCommandPath(current string) string {
+	ordered := make([]string, 0, 16)
+	seen := make(map[string]struct{}, 16)
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		p = filepath.Clean(p)
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		ordered = append(ordered, p)
+	}
+
+	for _, p := range filepath.SplitList(current) {
+		add(p)
+	}
+
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		add(filepath.Join(home, ".local", "bin"))
+		add(filepath.Join(home, ".npm", "bin"))
+		add(filepath.Join(home, "bin"))
+		matches, _ := filepath.Glob(filepath.Join(home, ".nvm", "versions", "node", "*", "bin"))
+		if len(matches) > 0 {
+			sort.Strings(matches)
+			add(matches[len(matches)-1])
+		}
+	}
+
+	add("/usr/local/bin")
+	add("/usr/bin")
+	add("/bin")
+	add("/usr/sbin")
+	add("/sbin")
+	add("/snap/bin")
+
+	return strings.Join(ordered, string(os.PathListSeparator))
 }
 
 func (s *connectionState) waitSessionExit(sess *session) {
@@ -1216,7 +1270,8 @@ func (s *connectionState) runClaudeTurn(sess *session, prompt string) {
 	}
 	args = append(args, prompt)
 
-	cmd := exec.Command("claude", args...)
+	execName := s.server.toolExecName("claude", "claude")
+	cmd := exec.Command(execName, args...)
 	cmd.Dir = cwd
 	cmd.Env = withTerminalEnv(os.Environ())
 
@@ -1231,7 +1286,7 @@ func (s *connectionState) runClaudeTurn(sess *session, prompt string) {
 		return
 	}
 	if err := cmd.Start(); err != nil {
-		_ = s.sendError(fmt.Sprintf("claude start failed: %v", err))
+		_ = s.sendError(formatToolStartError("claude", execName, err))
 		return
 	}
 
@@ -2097,6 +2152,33 @@ func allowedTool(tool string) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func (a *agentServer) toolExecName(tool, fallback string) string {
+	switch tool {
+	case "claude":
+		if v := strings.TrimSpace(a.cfg.ClaudeBin); v != "" {
+			return v
+		}
+	case "codex":
+		if v := strings.TrimSpace(a.cfg.CodexBin); v != "" {
+			return v
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func formatToolStartError(tool, execName string, err error) string {
+	base := fmt.Sprintf("%s start failed: %v", tool, err)
+	lower := strings.ToLower(err.Error())
+	if strings.Contains(lower, "executable file not found") || strings.Contains(lower, "no such file or directory") {
+		envKey := "AGENT_" + strings.ToUpper(tool) + "_BIN"
+		return fmt.Sprintf("%s. 未找到可执行文件 %q；请在 agent.env 配置 %s=/绝对路径/%s（可用 `which %s` 获取），然后重启服务。", base, execName, envKey, tool, tool)
+	}
+	if strings.Contains(lower, "permission denied") {
+		return fmt.Sprintf("%s. 可执行文件权限不足，请执行 `chmod +x %s` 后重试。", base, execName)
+	}
+	return base
 }
 
 func exitCodeFromError(err error) int {

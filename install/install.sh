@@ -219,6 +219,8 @@ AGENT_QR_PATH="$HOME/.appcoding-agent/pairing-qr.png"
 AGENT_TUNNEL_AUTOSTART=1
 AGENT_TUNNEL_BIN=cloudflared
 AGENT_TUNNEL_TARGET_URL=http://127.0.0.1:8088
+AGENT_CLAUDE_BIN=claude
+AGENT_CODEX_BIN=codex
 CONF
   say "created env config: $ENV_PATH"
 else
@@ -240,6 +242,18 @@ if [[ -n "$CLOUDFLARED_BIN" && -x "$CLOUDFLARED_BIN" ]]; then
   say "set AGENT_TUNNEL_BIN=${CLOUDFLARED_BIN} in $ENV_PATH"
 fi
 
+if command -v claude >/dev/null 2>&1; then
+  set_env_kv "AGENT_CLAUDE_BIN" "$(command -v claude)"
+  say "set AGENT_CLAUDE_BIN=$(command -v claude) in $ENV_PATH"
+else
+  warn "claude not found in installer PATH; edit $ENV_PATH and set AGENT_CLAUDE_BIN manually if needed"
+fi
+
+if command -v codex >/dev/null 2>&1; then
+  set_env_kv "AGENT_CODEX_BIN" "$(command -v codex)"
+  say "set AGENT_CODEX_BIN=$(command -v codex) in $ENV_PATH"
+fi
+
 cat >"$RUNNER_PATH" <<RUN
 #!/usr/bin/env bash
 set -euo pipefail
@@ -247,6 +261,13 @@ if [[ -f "$ENV_PATH" ]]; then
   set -a
   source "$ENV_PATH"
   set +a
+fi
+export PATH="\$HOME/.local/bin:\$HOME/.npm/bin:\$HOME/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/snap/bin:\${PATH:-}"
+if [[ -d "\$HOME/.nvm/versions/node" ]]; then
+  latest_node_bin=\$(ls -1d "\$HOME"/.nvm/versions/node/*/bin 2>/dev/null | sort | tail -n1 || true)
+  if [[ -n "\$latest_node_bin" ]]; then
+    export PATH="\$latest_node_bin:\$PATH"
+  fi
 fi
 exec "$BIN_PATH"
 RUN
