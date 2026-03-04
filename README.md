@@ -13,6 +13,15 @@ APP_AGENT_ARCHIVE_FILE=/path/to/appcoding-agent_linux_amd64.tar.gz \
 bash install/install.sh
 ```
 
+离线完整包（单文件下载）：
+
+```bash
+# 下载 Release 里的 appcoding-agent_offline_bundle.tar.gz 后执行
+tar -xzf appcoding-agent_offline_bundle.tar.gz
+cd appcoding-agent_offline_bundle
+bash install-offline.sh
+```
+
 启动检查：
 
 ```bash
