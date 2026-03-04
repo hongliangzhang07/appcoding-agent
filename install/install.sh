@@ -359,16 +359,17 @@ else
   warn "cloudflared is not installed, tunnel-start will fail until installed"
 fi
 
-say "done"
+say "安装完成"
 echo
-echo "Next commands:"
-echo "  ${APP_NAME}ctl status"
-echo "  ${APP_NAME}ctl pairing"
-echo "  ${APP_NAME}ctl tunnel-status"
-echo "  ${APP_NAME}ctl logs"
+echo "请执行以下命令："
+echo "  启动服务：${APP_NAME}ctl start"
+echo "  查看状态：${APP_NAME}ctl status"
+echo "  生成二维码（配对信息）：${APP_NAME}ctl pairing"
+echo "  查看日志：${APP_NAME}ctl logs"
+echo "  查看隧道状态：${APP_NAME}ctl tunnel-status"
 
 echo
-echo "Current status:"
+echo "安装后自动检查："
 "$CTL_PATH" status || true
 
 http_addr="127.0.0.1:8088"
@@ -398,6 +399,6 @@ if [[ "$ready" == "1" ]]; then
   "$CTL_PATH" tunnel-status || true
   "$CTL_PATH" pairing || true
 else
-  warn "agent is not ready on http://${http_addr} yet"
-  warn "run: ${APP_NAME}ctl logs"
+  warn "服务尚未就绪: http://${http_addr}"
+  warn "可执行: ${APP_NAME}ctl logs"
 fi
